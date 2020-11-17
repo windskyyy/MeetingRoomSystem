@@ -2,6 +2,7 @@ package model
 
 import (
 	"database/sql"
+	"encoding/json"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/gomodule/redigo/redis"
 	"log"
@@ -26,8 +27,29 @@ var SignHead *SignLink
 var NotSignMap map[string]*NotSignLink
 var SignMap map[string]*SignLink
 
+type Data struct {
+	RoomId         string
+	UserName       string
+	UserPhone      string
+	UserEmail      string
+	StartTime      string
+	UserRemark     string
+	MeetingTopic   string
+	UserDepartment string
+}
 
-
+func NewData() *Data {
+	return &Data {
+		RoomId: "",
+		UserName: "",
+		UserPhone: "",
+		UserEmail: "",
+		StartTime: "",
+		UserRemark: "",
+		MeetingTopic: "",
+		UserDepartment: "",
+	}
+}
 
 func init(){
 	// redis pool
@@ -41,7 +63,7 @@ func init(){
 	}
 
 	// mysql
-	db, _ = sql.Open("mysql", "")
+	db, _ = sql.Open("mysql", "root:Xtm_0124@tcp(cdb-027nnpt2.cd.tencentcdb.com:10106)/GinMeetRoom")
 
 	db.SetMaxOpenConns(10)
 	db.SetMaxIdleConns(5)
@@ -120,13 +142,15 @@ func QueryAllFreeRoom() []string {
 	return ret
 }
 
-// 查询某时间段会议室状态 room = roomid + starttime
-func QueryRoomStatus(room string) int {
+// 查询某时间段会议室状态
+func QueryRoomStatus(data *Data) int {
 	rw.RLock()
 	defer rw.RUnlock()
 
 	c := pool.Get()
 	defer c.Close()
+
+	room := data.RoomId + data.StartTime
 
 	key := "notSign" + room
 	if flag, _ := redis.Int(c.Do("exists", key)); flag == 1 {
@@ -138,17 +162,40 @@ func QueryRoomStatus(room string) int {
 		return USING
 	}
 
+	key = "allRoom" + room
+	if flag, _ := redis.Int(c.Do("exists", key)); flag == 1 {
+		return FREE
+	}
+
+	msql := "select status from userInfo where roomId = ? and meetingStartTime = ?"
+	rows, err := db.Query(msql, data.RoomId, data.StartTime)
+	if err != nil {
+		log.Println(err)
+	}
+	for rows.Next() {
+		var status string
+		rows.Scan(&status)
+		if status == "notSign" {
+			return NOTSIGN
+		}
+		if status == "Sign" {
+			return USING
+		}
+	}
 	return FREE
 }
 
 
 // 预约会议室
 // bookRoom  返回0表示正常 返回1 表示会议室已被占用
-func BookRoom(starttime, roomid, username, userphone, useremail, userdepartment, userremark, usertopic string) int {
-	value := userdepartment + username
-	room := roomid + starttime
+func BookRoom(msg []byte) int {
+	var data Data
+	_ = json.Unmarshal(msg, &data)
 
-	NowStatus := QueryRoomStatus(room)
+	value := data.UserDepartment + data.UserName
+	room := data.RoomId + data.StartTime
+
+	NowStatus := QueryRoomStatus(&data)
 
 	if NowStatus != FREE {
 		log.Println("目标时间的该会议室已经被占用,预约失败")
@@ -169,7 +216,7 @@ func BookRoom(starttime, roomid, username, userphone, useremail, userdepartment,
 	}
 
 	// 设置过期时间
-	formatTime, err := time.Parse("20060102150405",starttime)
+	formatTime, err := time.Parse("20060102150405",data.StartTime)
 	endTime := formatTime.Unix()-8*60*60+15
 
 	key = "notSign" + room
@@ -178,7 +225,7 @@ func BookRoom(starttime, roomid, username, userphone, useremail, userdepartment,
 	// 插入mysql 预约者信息
 	msql := "insert into userInfo(name, phone, email, department, topic, roomId, meetingStartTime, remark, status, bookTime) VALUES( ?, ?, ?, ?, ?, ?, ?, ? , 'notSign' , now() )"
 
-	_, err = db.Exec(msql, username, userphone, useremail, userdepartment, usertopic, roomid, starttime, userremark)
+	_, err = db.Exec(msql, data.UserName, data.UserPhone, data.UserEmail, data.UserDepartment, data.MeetingTopic, data.RoomId, data.StartTime, data.UserRemark)
 	if err != nil {
 		log.Println("预约会议室插入mysql失败")
 	}
@@ -188,23 +235,26 @@ func BookRoom(starttime, roomid, username, userphone, useremail, userdepartment,
 	node.insertNode(NotSignHead)
 	NotSignMap[room] = node
 
-	log.Println("预约会议室成功， 预约人：", username, "部门： ", userdepartment, "会议室Id+使用时间:", roomid, starttime)
+	log.Println("预约会议室成功， 预约人：", data.UserName, "部门： ", data.UserDepartment, "会议室Id+使用时间:", data.RoomId, data.StartTime)
 	return 0
 }
 
 // 取消会议室预约
-func CancelRoom(starttime, roomid, username, userdepartment string) int {
-	room := roomid + starttime
+func CancelRoom(msg []byte) int {
+	var data Data
+	_ = json.Unmarshal(msg, &data)
+
+	room := data.RoomId + data.StartTime
 
 	// 校验会议室是否处于未签入状态
-	NowStatus := QueryRoomStatus(room)
+	NowStatus := QueryRoomStatus(&data)
 	if NowStatus != NOTSIGN {
 		log.Println("该会议室这个时间段并没有被预约")
 		return 1
 	}
 
 	// 校验会议室是否是这个人预约的
-	if judgePermissions(username, userdepartment, "notSign", room) == false {
+	if judgePermissions(data.UserName, data.UserDepartment, "notSign", room) == false {
 		log.Println("该会议室不是此人预约")
 		return 2
 	}
@@ -224,7 +274,7 @@ func CancelRoom(starttime, roomid, username, userdepartment string) int {
 
 	msql := "delete from userInfo where roomId = ? and meetingStartTime = ? and name = ? and department = ? "
 
-	_, err = db.Exec(msql, roomid, starttime, username, userdepartment)
+	_, err = db.Exec(msql, data.RoomId, data.StartTime, data.UserName, data.UserDepartment)
 	if err != nil {
 		log.Println("删除mysql失败")
 	}
@@ -233,24 +283,27 @@ func CancelRoom(starttime, roomid, username, userdepartment string) int {
 	tempNode := NotSignMap[room]
 	tempNode.delNode()
 
-	log.Println("取消预约成功, 取消人: ", username, " 会议室ID：", roomid, " 使用时间: ", starttime)
+	log.Println("取消预约成功, 取消人: ", data.UserName, " 会议室ID：", data.RoomId, " 使用时间: ", data.StartTime)
 	return 0
 }
 
 // 签入会议室
-func SignRoom(roomid, starttime, username, userdepartment string) int {
-	room := roomid + starttime
-	value := userdepartment + username
+func SignRoom(msg []byte) int {
+	var data Data
+	_ = json.Unmarshal(msg, &data)
+
+	room := data.RoomId + data.StartTime
+	value := data.UserDepartment + data.UserName
 
 	// 校验会议室的状态
-	NowStatus := QueryRoomStatus(room)
+	NowStatus := QueryRoomStatus(&data)
 	if NowStatus != NOTSIGN {
 		log.Println("该会议室没有被预约")
 		return 1
 	}
 
 	// 校验用户权限
-	if judgePermissions(username, userdepartment, "notSign", room) == false {
+	if judgePermissions(data.UserName, data.UserDepartment, "notSign", room) == false {
 		log.Println("您没有权限，请预约当事人操作")
 		return 2
 	}
@@ -276,7 +329,7 @@ func SignRoom(roomid, starttime, username, userdepartment string) int {
 	}
 
 	// 设置过期时间
-	formatTime, err := time.Parse("20060102150405",starttime)
+	formatTime, err := time.Parse("20060102150405",data.StartTime)
 	endTime := formatTime.Unix()-8*60*60+60
 	_, err = c.Do("expireat", key,  int32(endTime))
 	if err != nil {
@@ -285,7 +338,7 @@ func SignRoom(roomid, starttime, username, userdepartment string) int {
 
 	// 修改DB预约状态为已签入
 	msql := "update userInfo SET status = 'Sign' where roomid = ? and meetingStartTime =?  and name = ?  and department = ?"
-	_, err = db.Exec(msql, roomid, starttime, username, userdepartment)
+	_, err = db.Exec(msql, data.RoomId, data.StartTime, data.UserName, data.UserDepartment)
 	if err != nil {
 		log.Println("修改mysql状态失败")
 	}
@@ -298,16 +351,19 @@ func SignRoom(roomid, starttime, username, userdepartment string) int {
 	tempSignNode.insertNode(SignHead)
 	SignMap[room] = tempSignNode
 
-	log.Println("用户：" + username + " 已签入会议室Id: " + roomid)
+	log.Println("用户：" + data.UserName + " 已签入会议室Id: " + data.RoomId)
 	return 0
 }
 
 // 提前结束会议室的使用
-func EndUseRoom(username, userdepartment, roomid, starttime string) int {
+func EndUseRoom(msg []byte) int {
+	var data Data
+	_ = json.Unmarshal(msg, &data)
+
 	// 校验权限
 
-	room := roomid + starttime
-	if judgePermissions(username, userdepartment, "Sign", room) == false {
+	room := data.RoomId + data.StartTime
+	if judgePermissions(data.UserName, data.UserDepartment, "Sign", room) == false {
 		log.Println("您没有此权限")
 		return 1
 	}
@@ -328,7 +384,7 @@ func EndUseRoom(username, userdepartment, roomid, starttime string) int {
 
 	// 删除DB预约者信息
 	msql := "delete from userInfo where roomid = ? and meetingStartTime = ? and name = ? and department = ?"
-	_,err = db.Exec(msql, roomid, starttime, userdepartment, userdepartment)
+	_,err = db.Exec(msql, data.RoomId, data.StartTime, data.UserName, data.UserDepartment)
 	if err != nil {
 		log.Println("删除mysql记录失败")
 	}
@@ -337,20 +393,19 @@ func EndUseRoom(username, userdepartment, roomid, starttime string) int {
 	node := SignMap[room]
 	node.delNode()
 
-	log.Println("提前结束会议室的使用, roomid = ", roomid, " starttime = " , starttime, " 用户 = ", username)
+	log.Println("提前结束会议室的使用, roomid = ", data.RoomId, " starttime = " , data.StartTime, " 用户 = ", data.UserName)
 	return 0
 }
 
 // 将最新状态更新到Mysql中
-func UpdateData(roomId, starttime string) {
-	room := roomId + starttime
-	NowStatus := QueryRoomStatus(room)
+func UpdateData(data *Data) {
+	NowStatus := QueryRoomStatus(data)
 	if NowStatus == FREE {
-		db.Exec("delete from userInfo where roomId = ? and meetingStartTime = ?", roomId, starttime)
+		db.Exec("delete from userInfo where roomId = ? and meetingStartTime = ?", data.RoomId, data.StartTime)
 	} else if NowStatus == NOTSIGN {
-		db.Exec("update userInfo SET status = 'notSign' where roomid = ? and meetingStartTime = ?", roomId, starttime)
+		db.Exec("update userInfo SET status = 'notSign' where roomid = ? and meetingStartTime = ?", data.RoomId, data.StartTime)
 	} else if NowStatus == USING {
-		db.Exec("update userInfo SET status = 'Sign' where roomid = ? and meetingStartTime = ?", roomId, starttime)
+		db.Exec("update userInfo SET status = 'Sign' where roomid = ? and meetingStartTime = ?", data.RoomId, data.StartTime)
 	}
 }
 
@@ -359,9 +414,10 @@ func TimeoutChangeStatus() {
 	// 遍历两条链表，更新数据
 	NotSignCur := NotSignHead.next
 	for NotSignCur != nil {
-		roomId := NotSignCur.roomId
-		starttime := NotSignCur.meetStartTime
-		UpdateData(roomId, starttime)
+		temp := NewData()
+		temp.RoomId = NotSignCur.roomId
+		temp.StartTime = NotSignCur.meetStartTime
+		UpdateData(temp)
 		if NotSignCur.next == nil { // 如果是最后一个节点
 			NotSignCur.delNode()
 			break
@@ -372,9 +428,10 @@ func TimeoutChangeStatus() {
 
 	SignCur := SignHead.next
 	for SignCur != nil {
-		roomId := SignCur.roomId
-		starttime := SignCur.meetStartTime
-		UpdateData(roomId, starttime)
+		temp := NewData()
+		temp.RoomId = SignCur.roomId
+		temp.StartTime = SignCur.meetStartTime
+		UpdateData(temp)
 		if SignCur.next == nil { // 如果是最后一个节点
 			SignCur.delNode()
 			break
