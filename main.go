@@ -1,10 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"github.com/gin-gonic/gin"
 	"meetingBook/model"
 	"net/http"
 )
+
 
 func main() {
 	router := gin.Default()
@@ -26,7 +28,21 @@ func main() {
 		userremark := c.PostForm("remark")
 		meetingTopic := c.PostForm("topic")
 
-		ok := model.BookRoom(startTime, roomId, username, userphone, useremail, userdepartment, userremark, meetingTopic)
+		data := model.Data {
+			RoomId:         roomId,
+			UserName:       username,
+			UserPhone:      userphone,
+			UserEmail:      useremail,
+			StartTime:      startTime,
+			UserRemark:     userremark,
+			MeetingTopic:   meetingTopic,
+			UserDepartment: userdepartment,
+		}
+
+		temp, _ := json.Marshal(data)
+
+		ok := model.BookRoom(temp)
+
 		if ok == 0 {
 			c.String(http.StatusOK, "预约成功")
 		} else if ok == 1 {
@@ -46,7 +62,17 @@ func main() {
 		username := c.PostForm("name")
 		userdepartment := c.PostForm("department")
 
-		ok := model.CancelRoom(startTime, roomid, username, userdepartment)
+		data := model.Data {
+			RoomId: roomid,
+			StartTime: startTime,
+			UserName: username,
+			UserDepartment: userdepartment,
+		}
+
+		temp, _ := json.Marshal(data)
+
+		ok := model.CancelRoom(temp)
+
 		if ok == 0 {
 			c.String(http.StatusOK, "取消预约成功")
 		} else if ok == 1 {
@@ -64,7 +90,17 @@ func main() {
 		username := c.PostForm("name")
 		userdepartment := c.PostForm("department")
 
-		ok := model.SignRoom(roomid, startTime, username, userdepartment)
+		data := model.Data {
+			RoomId: roomid,
+			StartTime: startTime,
+			UserName: username,
+			UserDepartment: userdepartment,
+		}
+
+		temp, _ := json.Marshal(data)
+
+		ok := model.SignRoom(temp)
+
 		if ok == 0 {
 			c.String(http.StatusOK, "取消预约成功")
 		} else if ok == 1 {
@@ -82,7 +118,17 @@ func main() {
 		username := c.PostForm("name")
 		userdepartment := c.PostForm("department")
 
-		ok := model.EndUseRoom(username, userdepartment, roomid, startTime)
+		data := model.Data {
+			RoomId: roomid,
+			StartTime: startTime,
+			UserName: username,
+			UserDepartment: userdepartment,
+		}
+
+		temp, _ := json.Marshal(data)
+
+		ok := model.EndUseRoom(temp)
+
 		if ok == 0 {
 			c.String(http.StatusOK, "取消预约成功")
 		} else if ok == 1 {
